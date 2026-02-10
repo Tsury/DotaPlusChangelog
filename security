@@ -1,0 +1,442 @@
+Below is a **drop-in “coding AI instruction spec”** to **retrofit** strong safety/risk controls into an **existing Python backend** (not a greenfield repo). It assumes your system already does:
+
+* detect target wallet trades (post-fill)
+* compute a mimic intent
+* place orders (paper or live)
+
+…but it lacks “don’t blow up” guardrails.
+
+---
+
+## CODING AI INSTRUCTIONS — Retrofit Risk + Circuit Breakers into an Existing Python Polymarket Follower
+
+You are a senior Python engineer and risk-systems architect. You are **NOT** building from scratch. You must modify an **existing Python backend** that already implements: detecting target wallet fills → generating mimic orders → paper/live execution. Your task is to add **security/risk measures** so the bot cannot lose everything quickly, can stop itself when things go wrong, and remains restart-safe. Everything must be configurable and testable.
+
+### 0) First: Map the existing system (mandatory)
+
+Before changing logic, you must produce a short “system map” based on actual code:
+
+1. Identify entrypoint(s): service runner, scheduler, worker, API.
+2. Locate these concrete integration points:
+
+   * **Detection pipeline**: where observed trades enter the system.
+   * **Decision pipeline**: where mimic/skip decisions happen.
+   * **Execution pipeline**: where an order is actually simulated/submitted.
+   * **Persistence**: DB tables/models for observed trades, decisions, executions, positions, P&L (or equivalent).
+   * **Config**: how config is loaded and validated (or not).
+   * **Logging**: logger used, format, sinks.
+3. For each integration point, name the exact files, classes, and functions.
+
+You must not guess. If something is missing, add it cleanly.
+
+---
+
+## 1) Design principle: “Fail closed” by default
+
+When anything looks wrong or ambiguous, the bot must **STOP trading**, not “try harder.”
+
+Define a simple global state machine in code:
+
+* `RUNNING` (detect + decide + execute)
+* `DEGRADED` (detect + decide, but execution disabled)
+* `HALTED` (detect optional, but no trading; requires manual reset)
+
+State must be **persisted**, so restarts do not clear a halt.
+
+---
+
+## 2) Add a unified Risk & Safety Gate (single choke point)
+
+You must implement one module that all trades must pass through, exactly once, **right before execution**.
+
+### Create a module:
+
+`risk/risk_gate.py`
+
+It exposes:
+
+```python
+@dataclass
+class OrderIntent:
+    # what we plan to do
+    observed_trade_id: str
+    market_id: str
+    token_id: str
+    side: Literal["BUY", "SELL"]
+    intended_price: float
+    intended_shares: float
+    intended_usdc: float
+    reason: str  # e.g. "mimic_trade"
+
+@dataclass
+class MarketSnapshot:
+    best_bid: float
+    best_ask: float
+    spread: float
+    depth_usdc_within_band: float
+    tick_size: float
+    ts: float
+
+@dataclass
+class PortfolioSnapshot:
+    total_equity_usdc: float
+    total_exposure_usdc: float
+    exposure_by_market_usdc: dict[str, float]
+    open_orders_count: int
+    realized_pnl_today_usdc: float
+    drawdown_from_peak_usdc: float
+
+@dataclass
+class GateDecision:
+    action: Literal["ALLOW", "SKIP", "HALT"]
+    reason_code: str
+    reason_details: dict
+```
+
+Main function:
+
+```python
+def evaluate_order_intent(
+    intent: OrderIntent,
+    market: MarketSnapshot,
+    portfolio: PortfolioSnapshot,
+    config: RiskConfig,
+    breaker_state: BreakerState,
+) -> GateDecision:
+    ...
+```
+
+**All execution paths must call this function** (paper and live). No bypasses.
+
+---
+
+## 3) Risk config: everything configurable + validated
+
+Add config schema validation using **Pydantic** (preferred) or your existing config system.
+
+Create:
+`config/risk_config.py`
+
+### Minimum config fields (add more if already present):
+
+**Global caps**
+
+* `max_total_exposure_usdc`
+* `max_daily_loss_usdc`
+* `max_drawdown_usdc` (from peak equity)
+* `max_single_order_usdc`
+* `max_single_order_shares`
+* `max_orders_per_hour`
+* `max_concurrent_open_orders`
+
+**Per-market caps**
+
+* `max_market_exposure_usdc` (default)
+* optional overrides by market slug/id
+
+**Market sanity thresholds**
+
+* `max_spread_abs` (e.g. 0.012 = 1.2c)
+* `max_spread_rel_pct`
+* `min_depth_usdc_within_band`
+* `max_price_deviation_from_reference` (guard against stale book)
+
+**Execution safety**
+
+* `require_marketable: bool` (default True)
+* `default_tif: "FOK" | "GTC" | "GTD"`
+* `cancel_after_ms` (mandatory if not FOK)
+* `max_fill_slippage_abs` (hard breaker)
+* `max_fill_slippage_mult_of_tolerance` (hard breaker)
+
+**Anomaly limits**
+
+* `target_trade_storm_n`
+* `target_trade_storm_window_s`
+* `max_consecutive_execution_failures`
+
+**Kill switches**
+
+* `halt_file_path` (e.g. `./HALT`)
+* `remote_kill_switch_url` (optional)
+* `manual_reset_required: bool` (default True)
+
+Validation rules must prevent nonsense:
+
+* max_single_order_usdc <= max_total_exposure_usdc
+* max_daily_loss_usdc < max_total_exposure_usdc (or at least sane)
+* spreads and tolerances within [0, 0.10] etc.
+
+Also add “two-man rule” style guard:
+
+* `LIVE_ENABLED` must be explicitly true in config AND an env var `I_KNOW_WHAT_I_AM_DOING=YES` must be present, otherwise live execution refuses to start.
+
+---
+
+## 4) Circuit Breakers: stop itself when things go bad
+
+Create:
+`risk/circuit_breaker.py`
+
+### Breaker events to implement (minimum)
+
+Breakers should be **edge-triggered**, persisted, and have clear reason codes.
+
+1. **DAILY_LOSS**
+   If realized P&L today <= -max_daily_loss_usdc → `HALT`
+
+2. **DRAWDOWN**
+   If drawdown from peak equity >= max_drawdown_usdc → `HALT`
+
+3. **SLIPPAGE_BLOWOUT**
+   If actual fill price worse than planned by:
+
+* abs slippage > max_fill_slippage_abs OR
+* abs slippage > max_fill_slippage_mult_of_tolerance * tolerance
+  → `HALT`
+
+4. **EXECUTION_FAILURE_STREAK**
+   If consecutive failures >= max_consecutive_execution_failures → `HALT`
+
+5. **DATA_INTEGRITY**
+   If observed trade “same ID, different payload” or missing required fields → `HALT`
+
+6. **TARGET_TRADE_STORM**
+   If >N observed target trades in window → switch to `DEGRADED` for cooldown (configurable), or `HALT` if severe.
+
+7. **KILL_SWITCH**
+   If halt file exists OR remote kill returns “halt” → `HALT` immediately.
+
+### Persisted breaker state
+
+Add DB table or equivalent persistent store:
+
+`breaker_state`:
+
+* `name` (PK)
+* `status` (`OK|TRIPPED`)
+* `tripped_at`
+* `details_json`
+* `last_seen_at`
+
+Also persist global bot status:
+`bot_state`:
+
+* `status` (`RUNNING|DEGRADED|HALTED`)
+* `reason_code`
+* `details_json`
+* `updated_at`
+
+Manual reset must be explicit:
+
+* CLI command `botctl reset-breakers --force` sets breakers to OK and status RUNNING.
+* If `manual_reset_required` true, do not auto-resume.
+
+---
+
+## 5) Portfolio & Exposure tracking (needed for limits)
+
+If the codebase already tracks positions/P&L, reuse it; otherwise implement minimal tracking.
+
+### Requirements:
+
+* Track **exposure** by market/token (notional at risk).
+* Track realized P&L today.
+* Track equity peak to compute drawdown.
+* Track open orders count (live mode).
+
+Add/update tables if missing:
+
+* `positions` (token_id, shares, avg_cost, market_id, updated_at)
+* `fills` or `executions` already likely exists: must include filled_shares, avg_fill_price, filled_usdc, ts.
+* `equity_snapshots` (optional but recommended): ts, equity_usdc
+
+Provide functions:
+
+* `get_portfolio_snapshot(now) -> PortfolioSnapshot`
+* `update_from_fill(fill)` updates positions + realized pnl + equity peak
+
+Paper mode must update these too (so breakers work in paper/shadow).
+
+---
+
+## 6) Execution wrapper: safe defaults + two-phase commit
+
+Locate the live order submission function. Wrap it so it can’t submit without passing risk gate and without recording intent.
+
+### Two-phase commit
+
+Before submitting:
+
+1. Write an `execution_plan` row:
+
+   * observed_trade_id
+   * intended_price/shares/usdc
+   * tolerance used
+   * decision metadata
+   * status `PLANNED`
+2. Submit order
+3. Update row to `SUBMITTED` with order_id
+4. Finalize to `FILLED|CANCELLED|FAILED` with fill details
+
+If step 2 fails, you have a record and won’t “double submit” on restart.
+
+### “Do not rest orders” policy
+
+Default: **FOK** (fill-or-kill). If not supported, emulate:
+
+* place marketable limit
+* poll quickly
+* cancel after `cancel_after_ms`
+
+Never place post-only orders for this follower bot (unless explicitly configured and you know what you’re doing).
+
+---
+
+## 7) Decision-to-execution wiring (must modify existing flow)
+
+You must ensure the order flow is:
+
+**ObservedTrade → Decision (mimic/skip) → Build OrderIntent → RiskGate → (ALLOW) Executor**
+
+Not:
+
+* “decision already implies safe” (no)
+* “executor does some checks sometimes” (no)
+
+The risk gate is authoritative and can override “mimic” into “skip” or “halt.”
+
+Add explicit reason propagation:
+
+* Every skip must have `reason_code`
+* Every halt must persist `bot_state` with reason and details
+
+---
+
+## 8) Observability: logs + audit trail + metrics
+
+### Logging
+
+Add structured logging (json) with redaction:
+
+* never log secrets
+* never log signed payloads
+
+For every observed trade:
+
+* `observed_trade_id`, market/token, side, observed_price, observed_ts
+  For every decision:
+* mimic/skip, reason_code
+  For every gate decision:
+* ALLOW/SKIP/HALT, reason_code
+  For every execution:
+* submitted/filled/cancelled/failed, avg fill price, slippage
+
+### Audit JSONL
+
+Append-only JSONL file (configurable path) containing:
+
+* observed event
+* decision
+* gate decision
+* execution result
+* breaker events
+
+This is your postmortem gold.
+
+### Metrics (optional but recommended)
+
+Expose counters:
+
+* trades_detected
+* trades_mimicked
+* trades_skipped_by_reason
+* halts_by_reason
+* avg_slippage
+* execution_failures
+
+---
+
+## 9) Safety modes (must support)
+
+Implement these modes cleanly:
+
+* **PAPER**: simulate fills; update portfolio; breakers can trigger.
+* **SHADOW**: run everything (including risk gate), but do not submit orders; log what would have been done.
+* **LIVE**: submit orders; requires explicit enablement.
+
+These must be mutually exclusive and validated at startup.
+
+---
+
+## 10) Testing: you must add tests for the safety system
+
+Add unit tests for:
+
+### Risk gate
+
+* blocks orders above max_single_order_usdc
+* blocks orders causing total exposure > max_total_exposure_usdc
+* blocks per-market exposure overflow
+* blocks when spread too wide
+* blocks when depth too low
+* blocks when not marketable (require_marketable)
+
+### Circuit breakers
+
+* daily loss triggers HALT
+* slippage blowout triggers HALT
+* failure streak triggers HALT
+* kill switch triggers HALT
+
+### Idempotency
+
+* reprocessing same observed trade does not resubmit
+* planned execution survives restart
+
+Use mocked market snapshots and mocked execution responses.
+
+---
+
+## 11) “Stop itself” behaviors (explicit acceptance criteria)
+
+Your implementation is accepted only if:
+
+1. If the bot suffers a simulated/live fill with slippage beyond threshold, it **halts** and refuses to trade until manual reset.
+2. If daily realized loss exceeds limit, it **halts** and refuses to trade until manual reset (or next day if configured).
+3. If execution fails repeatedly, it **halts**.
+4. If the `HALT` file appears, it halts within one polling loop.
+5. All halts are persisted and survive restart.
+6. Risk checks apply identically to paper, shadow, and live.
+
+---
+
+## 12) Deliverables
+
+* New modules: `risk_gate.py`, `circuit_breaker.py`, config schema
+* DB migrations / schema changes
+* Wiring changes in existing pipeline (show diff or list)
+* Tests added
+* Updated README: how to configure caps, how to reset halts, how to run shadow mode
+
+---
+
+## Implementation notes (practical choices)
+
+* Use `pydantic` for config validation.
+* If DB uses SQLAlchemy, add Alembic migration; if raw sqlite, add migration runner.
+* Keep risk evaluation pure (no network calls inside), pass snapshots in.
+
+---
+
+### Extra “paranoia settings” you should implement as defaults
+
+Set these defaults in config if not provided:
+
+* `max_single_order_usdc`: small (e.g., 50–200)
+* `max_total_exposure_usdc`: modest (e.g., 500–2000)
+* `max_daily_loss_usdc`: very small (e.g., 50–150)
+* `default_tif`: FOK
+* `cancel_after_ms`: 1500–3000
+* `manual_reset_required`: true
+* `require_marketable`: true

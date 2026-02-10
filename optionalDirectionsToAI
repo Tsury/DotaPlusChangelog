@@ -1,0 +1,512 @@
+I’m assuming the constraints we locked in: **you are following a specific wallet, without their API key**. That means detection is from **on-chain activity** (Data API `/activity`) and you cannot see their resting orders. ([Polymarket Documentation][1])
+
+---
+
+## MASTER PROMPT FOR THE CODING AI (paste as-is)
+
+You are a senior TypeScript engineer and trading-systems architect. Build a production-grade Polymarket “wallet follower” bot that detects a target wallet’s on-chain trades and attempts to mimic them in either **PAPER** or **LIVE** mode, with strict skip logic based on slippage, liquidity, and risk. Everything must be configurable. The bot must be robust, idempotent, observable, and safe-by-default.
+
+### 0) Hard constraints and ground truth (must follow)
+
+* We track a **target wallet** with **no API key** and **no privileged websocket user feed**. We can only detect target activity using **Polymarket Data API on-chain activity**:
+
+  * `GET https://data-api.polymarket.com/activity` returns records with fields including `proxyWallet`, `timestamp`, `conditionId`, `type` (TRADE), `usdcSize`, `price`, `asset`, `side` (BUY/SELL), `outcomeIndex`, plus `title/slug/icon` etc. ([Polymarket Documentation][1])
+* For market state, use Polymarket CLOB public endpoints:
+
+  * `GET https://clob.polymarket.com/book?token_id=...` returns bids/asks arrays, tick_size, min_order_size. ([Polymarket Documentation][2])
+* For LIVE mode, orders are placed via the CLOB API (auth required). All orders are “limit”; “market” is implemented by placing a marketable limit order that crosses resting liquidity. ([Polymarket Documentation][3])
+* The CLOB is hybrid: **off-chain matching** + **on-chain settlement**; the operator manages off-chain order management and submits matched trades for on-chain execution. ([Polymarket Documentation][4])
+
+### 1) Goals
+
+Implement a bot with this pipeline:
+
+1. **Detect** new target wallet TRADE events (BUY/SELL) via `/activity`.
+2. **Normalize** them into internal “ObservedTrade” objects.
+3. **Decide** whether to mimic or skip using configurable rules:
+
+   * price deviation (slippage band)
+   * liquidity/depth checks
+   * spread limits
+   * max age / max detection lag
+   * per-market allow/deny lists
+   * risk/exposure caps
+4. **Execute**
+
+   * PAPER: simulate fills based on current orderbook with deterministic rules.
+   * LIVE: place the corresponding order in your own account (using official client), wait/cancel per policy.
+5. **Persist** everything so restarts resume correctly (idempotent, exactly-once behavior per observed trade).
+6. **Report/Log** decisions and outcomes (why skipped, fill price, latency, P&L estimates).
+
+### 2) Non-goals (explicit)
+
+* Do NOT attempt to infer target’s open orders or identity beyond on-chain activity.
+* Do NOT build MEV/mempool monitoring.
+* Do NOT assume perfect fills; model partial fills.
+
+### 3) Language / stack / project quality
+
+* TypeScript, Node.js (>=20).
+* Use strict typing, linting, and tests.
+* Use SQLite for persistence (file-based, simple) and schema migrations.
+* Provide a clean CLI + config file.
+* No secrets in logs; secrets must be read from env vars.
+
+### 4) Repository structure (must implement)
+
+```
+polymarket-follower/
+  package.json
+  tsconfig.json
+  .env.example
+  README.md
+  config/
+    default.yaml
+    example.paper.yaml
+    example.live.yaml
+  src/
+    index.ts                 // CLI entry: run follower
+    cli.ts                   // parse args, load config
+    config.ts                // config schema validation (zod)
+    logger.ts                // structured logging
+    db/
+      db.ts                  // sqlite connection
+      migrations.ts          // apply migrations
+      schema.sql             // tables
+      queries.ts             // typed queries
+    polymarket/
+      dataApi.ts             // /activity polling client
+      clobPublic.ts          // /book, /price, etc (public)
+      clobAuth.ts            // live trading client wrapper (L1/L2)
+      types.ts               // shared types
+      mapping.ts             // resolve token_id, outcome, etc
+    engine/
+      detector.ts            // polling + cursor + dedupe
+      decision.ts            // mimic/skip logic
+      sizing.ts              // how much to copy
+      executor.ts            // paper/live execution engine
+      paperSim.ts            // deterministic fill simulator
+      risk.ts                // exposure limits
+      reconcile.ts           // track our positions from fills
+    util/
+      time.ts
+      math.ts
+      retry.ts
+  test/
+    decision.test.ts
+    paperSim.test.ts
+    detector.test.ts
+```
+
+### 5) Configuration-first design (EVERYTHING configurable)
+
+Use YAML config with full schema validation (zod). Provide defaults + per-market overrides.
+
+#### 5.1 Required config schema (minimum)
+
+* `mode`: `"paper"` | `"live"`
+* `targetWallet`: string (0x…)
+* `polling`:
+
+  * `intervalMs`
+  * `lookbackSeconds` (on restart, refetch recent window to handle delays)
+  * `maxPagesPerPoll`
+  * `timeoutMs`
+  * `rateLimit` (requests per second)
+* `filters`:
+
+  * `typesAllowed` (default: ["TRADE"])
+  * `sidesAllowed` (["BUY","SELL"])
+  * `marketAllowListSlugs` (optional)
+  * `marketDenyListSlugs` (optional)
+  * `minUsdcSize` / `maxUsdcSize` (skip dust / whales)
+* `decision` (global defaults):
+
+  * `maxTradeAgeSeconds` (skip if too old)
+  * `maxDetectDelaySeconds` (skip if detection latency too high, if measurable)
+  * `priceTolerance`:
+
+    * `absCents` (e.g. 0.5 means 0.5¢ = 0.005)
+    * `relPct` (optional alternative)
+    * `useMaxOfAbsAndRel` boolean
+  * `spreadLimit`:
+
+    * `maxAbsCents`
+    * `maxRelPct`
+  * `depthRequirement`:
+
+    * `minNotionalUsdcWithinBand` (must be available on book within tolerance)
+    * `maxLevelsToScan`
+  * `tickHandling`:
+
+    * `rounding`: "toward_worse" | "toward_best"
+* `sizing`:
+
+  * `strategy`: "copy_usdc" | "copy_shares" | "fixed_usdc" | "ratio_usdc"
+  * `ratio` (if ratio)
+  * `fixedUsdc`
+  * `minOrderUsdc`
+  * `maxOrderUsdc`
+  * `maxPerMarketUsdc`
+  * `maxTotalExposureUsdc`
+* `execution`:
+
+  * `live`:
+
+    * `clobBaseUrl` (default [https://clob.polymarket.com](https://clob.polymarket.com))
+    * `dataApiBaseUrl` (default [https://data-api.polymarket.com](https://data-api.polymarket.com))
+    * `orderPolicy`:
+
+      * `orderType`: "FOK" | "GTC" | "GTD"
+      * `timeInForceSeconds` (for GTD)
+      * `cancelAfterMs` (if not filled)
+      * `postOnly` false by default (we are taker, not maker)
+  * `paper`:
+
+    * `fillModel`: "best_price" | "walk_book_within_band"
+    * `assumePartialFills` true/false
+    * `partialFillMaxPct` (e.g. 100% or 60%)
+    * `slippageNoise` (optional deterministic pseudo-random)
+* `storage`:
+
+  * `sqlitePath`
+* `logging`:
+
+  * `level`
+  * `pretty`
+  * `logDecisions` true
+  * `logBooks` false by default (can be huge)
+* `telemetry`:
+
+  * `metricsEnabled`
+  * `exportJsonlPath` (write events for later analysis/backtest)
+
+#### 5.2 Example config file (must include in repo)
+
+Provide an example YAML that includes per-market overrides:
+
+* different priceTolerance for near-1.00 markets
+* different maxOrderUsdc by market category
+
+### 6) Data model + DB schema (must implement)
+
+Use SQLite tables (with migrations) for idempotency:
+
+**Table: observed_trades**
+
+* `id` TEXT PRIMARY KEY (deterministic hash of: transactionHash + asset + side + usdcSize + price + timestamp)
+* `targetWallet` TEXT
+* `timestamp` INTEGER
+* `transactionHash` TEXT
+* `type` TEXT
+* `side` TEXT
+* `price` REAL
+* `usdcSize` REAL
+* `shares` REAL (from `size`)
+* `assetTokenId` TEXT (from `asset`)
+* `conditionId` TEXT
+* `outcomeIndex` INTEGER
+* `title` TEXT
+* `slug` TEXT
+* `rawJson` TEXT
+* `seenAt` INTEGER (local time)
+* `status` TEXT ("new"|"processed"|"skipped"|"error")
+
+**Table: decisions**
+
+* `observedTradeId` TEXT PRIMARY KEY
+* `decision` TEXT ("mimic"|"skip")
+* `skipReason` TEXT NULL
+* `toleranceAbs` REAL
+* `toleranceRel` REAL
+* `bestBid` REAL
+* `bestAsk` REAL
+* `spread` REAL
+* `depthWithinBandUsdc` REAL
+* `computedOrderUsdc` REAL
+* `computedOrderShares` REAL
+* `createdAt` INTEGER
+
+**Table: executions**
+
+* `id` TEXT PRIMARY KEY
+* `observedTradeId` TEXT
+* `mode` TEXT
+* `submittedAt` INTEGER
+* `filledAt` INTEGER NULL
+* `status` TEXT ("sim_filled"|"sim_partial"|"live_submitted"|"live_filled"|"live_cancelled"|"live_failed")
+* `fillPriceAvg` REAL NULL
+* `fillShares` REAL NULL
+* `fillUsdc` REAL NULL
+* `detailsJson` TEXT
+
+**Table: cursor_state**
+
+* `key` TEXT PRIMARY KEY (e.g. "activity_cursor")
+* `value` TEXT
+
+Also store an append-only JSONL audit log if configured.
+
+### 7) Polymarket integration details (must implement)
+
+#### 7.1 Detecting trades
+
+Implement `DataApiClient.getActivity(params)` that calls:
+
+* `GET {dataApiBaseUrl}/activity?user=<targetWallet>&...`
+  (Use whatever query params the docs support; implement filters in code if easier.)
+  Parse array entries; keep only `type === "TRADE"` by default. ([Polymarket Documentation][1])
+
+Polling:
+
+* Every `intervalMs`, call activity.
+* Use `lookbackSeconds` and local persisted cursor. Strategy:
+
+  * On each poll: request recent activity (e.g. last X seconds) and merge into DB using deterministic id.
+  * This avoids missing events if the API returns slightly out-of-order.
+* Ensure stable ordering by sorting by `timestamp` then deterministic tie-break.
+
+#### 7.2 Market state for decisions
+
+Implement `ClobPublicClient.getBook(tokenId)` that calls:
+
+* `GET {clobBaseUrl}/book?token_id=<assetTokenId>` ([Polymarket Documentation][2])
+  Compute:
+* bestBid = max(bids[0].price)
+* bestAsk = min(asks[0].price)
+* spread = bestAsk - bestBid
+  Compute `depthWithinBandUsdc`:
+* For BUY mimic: sum asks where askPrice <= maxAcceptablePrice
+* For SELL mimic: sum bids where bidPrice >= minAcceptablePrice
+  Use up to `maxLevelsToScan`.
+
+Tick handling:
+
+* Use `tick_size` from book to round your limit price.
+* For a BUY, rounding must be “toward worse” by default (round up to next tick) to ensure marketability; for SELL round down.
+
+### 8) Decision engine (core logic)
+
+For each ObservedTrade:
+
+1. Compute `ageSeconds = now - observed.timestamp`. If `ageSeconds > maxTradeAgeSeconds` => SKIP("too_old").
+2. Determine `targetPrice = observed.price`.
+3. Fetch current book and compute bestBid/bestAsk/spread.
+4. If spread > configured spreadLimit => SKIP("spread_too_wide").
+5. Compute tolerance:
+
+   * absTol = decision.priceTolerance.absCents / 100  (cents→dollars in 0..1 price units)
+   * relTol = targetPrice * (relPct/100)
+   * tol = useMaxOfAbsAndRel ? max(absTol, relTol) : (prefer abs if set else rel)
+6. Determine acceptable price band:
+
+   * If target BUY => we mimic BUY:
+
+     * currentEntry = bestAsk
+     * maxPrice = targetPrice + tol
+     * if currentEntry > maxPrice => SKIP("slippage_exceeded")
+   * If target SELL => we mimic SELL:
+
+     * currentEntry = bestBid
+     * minPrice = targetPrice - tol
+     * if currentEntry < minPrice => SKIP("slippage_exceeded")
+7. Liquidity check:
+
+   * Compute notional within band (depthWithinBandUsdc). If < minNotionalUsdcWithinBand => SKIP("insufficient_depth").
+8. Sizing:
+
+   * Determine our order size using `sizing.strategy`:
+
+     * copy_usdc: orderUsdc = observed.usdcSize * ratio (ratio default 1)
+     * copy_shares: orderShares = observed.shares * ratio
+     * fixed_usdc: orderUsdc = fixedUsdc
+     * ratio_usdc: orderUsdc = observed.usdcSize * ratio
+   * Apply caps: minOrderUsdc, maxOrderUsdc, maxPerMarketUsdc, maxTotalExposureUsdc (use risk module).
+9. If after caps size < min => SKIP("below_min_size").
+10. Otherwise DECISION = MIMIC with computed order params:
+
+* For BUY: place a marketable limit at `limitPrice = min(maxPriceRounded, bestAskRoundedOrBetter)` with policy.
+* For SELL: place at `limitPrice = max(minPriceRounded, bestBidRoundedOrBetter)`.
+
+Record the full decision details into DB.
+
+### 9) Execution engine
+
+Provide two interchangeable executors implementing the same interface:
+
+#### 9.1 Paper executor
+
+Given computed mimic order:
+
+* Fetch current book snapshot.
+* Simulate fill using `paper.fillModel`:
+
+  * `best_price`: fill entire size at bestBid/bestAsk if within band, else 0
+  * `walk_book_within_band`: consume levels up to band, compute VWAP. Support partial fills.
+* Apply optional deterministic slippage noise within `slippageNoise` bounds.
+* Persist execution result in DB (`sim_filled` / `sim_partial` / `sim_unfilled`).
+* Update “paper positions” ledger:
+
+  * positions per token_id: shares, avg cost basis, realized/unrealized P&L estimate using midpoint or last price (optional).
+* Output a concise log line: observed trade → mimic/skip → simulated fill.
+
+#### 9.2 Live executor (must be safely isolated)
+
+* Use official Polymarket CLOB client (TypeScript) as recommended by docs. (They mention using open source TS libs and quickstart shows TS install). ([Polymarket Documentation][3])
+* Implement L1/L2 auth flow (private key + API key) per Polymarket docs; store secrets only in env vars.
+* Place single order via `POST /order` equivalent. ([Polymarket Documentation][3])
+* Order policy:
+
+  * For “marketable”: choose orderType = FOK by default to avoid resting risk (configurable).
+  * If FOK fails due to partial liquidity, consider “FAK” if supported by client; otherwise, implement:
+
+    * place GTC then cancel after cancelAfterMs if not filled.
+* After submission, poll order status (or trades endpoint) until filled/cancelled/timeout.
+* Record final status in DB with fills and avg fill price.
+* Risk safety: if live executor errors, do not retry blindly; apply backoff and mark observedTrade as “error” with reason.
+
+### 10) Idempotency & restart behavior (mandatory)
+
+* The bot must be safe to restart at any time.
+* Use deterministic observedTrade IDs and “processed” status so each observed target trade is handled once.
+* Each poll re-reads a lookback window; duplicates must be no-ops.
+* Execution attempts must be idempotent:
+
+  * Do not submit a second live order for the same observedTrade if an execution row exists with submitted status unless explicitly configured.
+
+### 11) CLI commands (must implement)
+
+* `npm run start -- --config config/example.paper.yaml`
+* `npm run start -- --config config/example.live.yaml`
+* `npm run backtest -- --config ... --from <ts> --to <ts>`
+
+  * Backtest replays historical observed_trades from DB (or fetches from Data API) and runs decision+paperSim, producing a report.
+* `npm run report` prints:
+
+  * number of observed trades, mimicked, skipped (reasons histogram)
+  * average slippage observed
+  * estimated P&L (paper) per market
+
+### 12) Testing (must include)
+
+Unit tests:
+
+* Decision engine:
+
+  * BUY mimic within tolerance passes
+  * BUY mimic outside tolerance skips
+  * depth insufficient skips
+  * tick rounding is correct
+* Paper sim:
+
+  * walk_book produces correct VWAP
+  * partial fills occur as expected
+* Detector:
+
+  * dedupe works
+  * out-of-order timestamps handled
+
+Use mocked HTTP responses for Data API and /book.
+
+### 13) Logging & observability (must implement)
+
+Structured logs:
+
+* Every observed trade produces one decision log with reason if skipped.
+* Every execution produces outcome logs.
+* Include `latencyMs = now - observed.timestamp*1000` in logs.
+* Write JSONL audit trail if configured.
+
+### 14) README (must include)
+
+* Setup steps for paper mode (no keys)
+* Setup for live mode (env vars, warnings)
+* Explanation of slippage/skip logic and how to tune
+* Clear disclaimer: trading risk, platform rules, geographic restrictions
+
+### 15) Acceptance criteria (must satisfy)
+
+* Running in PAPER mode with a real target wallet prints decisions and simulated fills continuously, persists state, and survives restart without duplicating trades.
+* Switching to LIVE mode requires only flipping config + setting env vars; decision logic identical.
+* All thresholds and sizing are configurable via YAML; per-market overrides work.
+* Unit tests pass.
+
+---
+
+## Extra: starter config example you MUST generate
+
+Create `config/example.paper.yaml` with something like:
+
+```yaml
+mode: paper
+targetWallet: "0xTARGET..."
+polling:
+  intervalMs: 2500
+  lookbackSeconds: 300
+  maxPagesPerPoll: 5
+  timeoutMs: 8000
+  rateLimit:
+    rps: 2
+
+filters:
+  typesAllowed: ["TRADE"]
+  sidesAllowed: ["BUY", "SELL"]
+  minUsdcSize: 5
+  maxUsdcSize: 20000
+  marketDenyListSlugs: []
+
+decision:
+  maxTradeAgeSeconds: 180
+  priceTolerance:
+    absCents: 0.7        # 0.7¢
+    relPct: 1.0
+    useMaxOfAbsAndRel: true
+  spreadLimit:
+    maxAbsCents: 1.2
+    maxRelPct: 4
+  depthRequirement:
+    minNotionalUsdcWithinBand: 200
+    maxLevelsToScan: 50
+  tickHandling:
+    rounding: "toward_worse"
+
+sizing:
+  strategy: "ratio_usdc"
+  ratio: 0.25
+  minOrderUsdc: 5
+  maxOrderUsdc: 200
+  maxPerMarketUsdc: 400
+  maxTotalExposureUsdc: 1500
+
+execution:
+  paper:
+    fillModel: "walk_book_within_band"
+    assumePartialFills: true
+    partialFillMaxPct: 100
+    slippageNoise:
+      enabled: false
+
+storage:
+  sqlitePath: "./data/follower.sqlite"
+
+logging:
+  level: "info"
+  pretty: true
+  logDecisions: true
+  logBooks: false
+
+telemetry:
+  metricsEnabled: true
+  exportJsonlPath: "./data/audit.jsonl"
+```
+
+Also generate `example.live.yaml` with identical decision logic but `mode: live` and live execution fields.
+
+---
+
+A small realism note: because `/activity` is **on-chain**, the follower will always be “late”, so your skip thresholds are what prevent you from turning the strategy into a slippage donation machine. ([Polymarket Documentation][1])
+
+[1]: https://docs.polymarket.com/developers/misc-endpoints/data-api-activity "Get User On-Chain Activity (Data-API) - Polymarket Documentation"
+[2]: https://docs.polymarket.com/api-reference/orderbook/get-order-book-summary "Get order book summary - Polymarket Documentation"
+[3]: https://docs.polymarket.com/developers/CLOB/orders/create-order "Place Single Order - Polymarket Documentation"
+[4]: https://docs.polymarket.com/developers/CLOB/introduction "CLOB Introduction - Polymarket Documentation"

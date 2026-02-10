@@ -1,0 +1,215 @@
+upgrade your bot with the “episode / aggregation / messy scenarios” logic. 
+
+---
+
+## Coding-AI Instructions: Add “Episode Aggregation + Scenario Handling” to Existing Polymarket Follower (Python)
+
+You are working on an **existing Python backend** that follows a **specific Polymarket wallet without API key** (detects target fills via activity feed) and then attempts to mimic/skip based on tolerance, depth, risk controls. The system currently reacts “per fill” too literally. Your job: implement **episode aggregation** and **scenario-aware responses** so the bot behaves sensibly when the target slices orders, ladder-buys, flips direction, or churns.
+
+### Constraints / assumptions
+
+* We detect target activity only **after fills** (no visibility into their open orders).
+* The execution layer already supports PAPER and LIVE modes.
+* There is already a decision layer with tolerance / spread / depth checks, and a risk gate / breakers (or you’ll integrate with it).
+
+### Goal
+
+Replace “process each fill independently” with:
+
+1. ingest fills,
+2. group into **episodes** per market,
+3. compute **net intent** per episode,
+4. decide ONE action per episode (mimic net once, or skip),
+5. persist episode state and be restart-safe.
+
+---
+
+# 1) Implement “Episode Builder” (core new component)
+
+### What an episode is
+
+Group multiple fills for the **same market (token_id/condition_id)** that occur close in time into one “episode”. Use two windows:
+
+* `EPISODE_WINDOW_SEC` (e.g. 60–180s): groups same-market fills close in time.
+* `CHOP_WINDOW_SEC` (e.g. 120–300s): if buys and sells interleave within this, treat as “chop” and net them.
+
+Make these config keys, per-market override optional.
+
+### Episode output
+
+Each episode should compute summary stats:
+
+* list of fills (buy fills, sell fills)
+* `episode_start_ts`, `episode_end_ts`
+* `total_buy_usdc`, `total_sell_usdc`
+* `total_buy_shares`, `total_sell_shares`
+* `net_usdc = buys - sells`
+* `net_shares = buy_shares - sell_shares`
+* `vwap_buy`, `vwap_sell`, `vwap_all` (usdc/shares)
+* `min_price`, `max_price`
+* flags / classification:
+
+  * `is_ladder_buy` (many buys, prices trending up)
+  * `is_avg_down` (many buys, prices trending down)
+  * `is_chop` (mixed buy/sell within chop window)
+  * `is_microfill` (median fill < threshold)
+  * `is_whale` (episode usdc > threshold)
+  * `is_near_certain` (vwap >= 0.95 or configurable)
+
+The “trending up/down” can be simple: compare first/last fill prices and count > N.
+
+### Persistence / restart safety
+
+Add persistence so episode formation is deterministic across restarts:
+
+* store observed fills idempotently (already exists)
+* add a small table or state record so the bot doesn’t re-run an episode action twice:
+
+  * `episodes` table with an ID (hash of market + start_ts bucket + last_fill_txhash, etc.)
+  * `episode_status`: NEW → DECIDED → EXECUTED / SKIPPED
+* Alternatively: derive episode ID deterministically from sorted fill IDs and store it when processed.
+
+---
+
+# 2) Decision: “One action per episode”
+
+Create a decision function that takes an Episode + current book snapshot + config + portfolio snapshot and outputs:
+
+* `MIMIC_INTENT` (one order max)
+* or `SKIP` with reason code
+
+### Default policy (conservative and copy-friendly)
+
+* **If episode is CHOP** (buys and sells interleaved):
+
+  * compute `net_usdc` / `net_shares`
+  * if |net| < `MIN_NET_NOTIONAL_USDC`: SKIP (`CHOP_NET_ZERO`)
+  * else mimic ONLY the net direction once (“copy net position”), not each leg.
+* **If episode is one-sided** (all buys or all sells):
+
+  * mimic once based on episode VWAP (default reference price).
+  * Do NOT chase multiple times.
+
+### Reference price & tolerance
+
+For mimic evaluation:
+
+* default reference: `episode_vwap` (buy-vwap for net buy, sell-vwap for net sell).
+* acceptable price:
+
+  * BUY: `best_ask <= ref_price + tol`
+  * SELL: `best_bid >= ref_price - tol`
+* Tighten tolerance automatically for near-certain prices (>=0.95), or just apply per-market override.
+
+### Depth & spread checks
+
+Reuse your existing checks, but apply them to the **single episode intent**:
+
+* spread limit
+* min depth within band
+* marketability requirement
+
+### Sizing policy
+
+Sizing should be based on episode totals, not individual fills:
+
+* default: `our_usdc = clamp(ratio * abs(net_usdc), min, max)`
+* if `COPY_SHARES` mode exists, use net_shares instead.
+* apply per-market exposure caps and global risk caps.
+
+### Special rules (make configurable)
+
+* **Microfills**: if episode total < `MIN_EPISODE_USDC`, skip.
+* **Whale episodes**: if huge, still mimic only up to caps; optionally require stricter depth.
+* **Average down / ladder**: still mimic only once; optionally reduce size if volatility inside episode exceeds threshold.
+
+---
+
+# 3) Execution behavior: “one attempt; don’t spiral”
+
+Once you decide MIMIC for an episode:
+
+* Create one OrderIntent and pass through your risk gate.
+* Make **one execution attempt** by default (FOK/cancel-fast).
+* Do not retry multiple times at progressively worse prices.
+* If it fails tolerance/depth/marketability, mark episode SKIPPED with reason.
+
+---
+
+# 4) Case handling: what to do for messy patterns
+
+Make sure your code handles these explicitly (as tests or at least clearly in logic):
+
+1. **10 buys same market, price rising**
+   → one net BUY intent using VWAP reference; if best ask is beyond tolerance, skip.
+
+2. **10 buys same market, price falling**
+   → one net BUY intent; optionally reduce size or tighten tol if episode volatility high.
+
+3. **mixed buys and sells in same market in short time (scalping)**
+   → CHOP: net; if near-zero net, skip; else mimic net only once.
+
+4. **buy episode then later sell episode**
+   → treat as separate episodes; only mimic exit if we have position / previously mimicked entry (config).
+
+5. **tons of tiny fills**
+   → aggregate; skip if episode total below min; don’t execute per-fill.
+
+6. **backlog (bot was down)**
+   → skip episodes whose age > maxTradeAge; do NOT “catch up”.
+
+---
+
+# 5) Config additions (keep it simple but flexible)
+
+Add config keys with sane defaults:
+
+* `episode_window_sec`
+* `chop_window_sec`
+* `min_episode_usdc`
+* `min_net_notional_usdc`
+* `micro_fill_usdc_threshold`
+* `whale_episode_usdc_threshold`
+* `near_certain_price_threshold` (e.g. 0.95)
+* `near_certain_tolerance_abs_cents` (tighter)
+* `max_episode_volatility_abs_cents` (optional)
+* `follow_exit_only_if_position` (default true)
+* `max_actions_per_market_per_hour` (cooldown)
+
+Support per-market overrides if your config system already supports it.
+
+---
+
+# 6) Logging / observability
+
+Every episode should log:
+
+* episode id, market, start/end, count fills
+* net direction, vwap, min/max price
+* classification flags (chop, ladder, etc.)
+* decision: mimic/skip + reason
+* execution result: filled/partial/cancelled + fill price + slippage vs ref
+
+Persist reason codes for later analysis.
+
+---
+
+# 7) Tests (at least lightweight)
+
+Add a few unit tests using fake fills + fake book snapshots:
+
+* ladder buy episode → one intent
+* chop episode with net≈0 → skip
+* chop episode with net buy → one net buy intent
+* buy then sell separated by time → two episodes, exit only if position exists
+* microfill episode total below threshold → skip
+
+---
+
+## Deliverable
+
+Implement the EpisodeBuilder + EpisodeDecision integration and wire it into the existing pipeline so that:
+
+* fills are no longer executed per-fill,
+* the bot produces at most one trade per market episode,
+* and restarts do not duplicate actions.

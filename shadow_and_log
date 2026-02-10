@@ -1,0 +1,244 @@
+Add **Shadow mode** + a **visual debug UI** that lets you inspect *everything* the bot saw and *exactly* why it decided mimic/skip/halt. It’s designed to bolt onto an existing Python backend.
+
+---
+
+## Coding-AI Instructions: Add SHADOW mode + Visual Debugging to Existing Python Polymarket Follower
+
+You are extending an existing Python backend (detect → episode aggregation → decision → execution, paper/live). The system must gain:
+
+1. **Shadow mode**: run full pipeline (detect + episode + decision + risk gate + breakers) but **never place orders**. It should behave like live, but “dry-run”, and record what it *would* have done.
+
+2. **Visual debugging**: a lightweight web UI + API so a human can browse:
+
+* raw observed fills
+* episode grouping
+* order book snapshots used
+* decisions & reasons (mimic/skip/halt)
+* risk-gate evaluation (all checks)
+* execution plan and “shadow execution result”
+* timelines + filters + diff of config
+
+Everything must be persisted so you can debug retroactively, including after restart.
+
+---
+
+# 1) Add run modes: PAPER / SHADOW / LIVE
+
+Add config `run_mode: "paper" | "shadow" | "live"`
+
+### Behavior requirements
+
+* PAPER: simulate fills, update portfolio ledger.
+* SHADOW: **no submission**, but still:
+
+  * builds episodes
+  * runs full decision engine
+  * runs risk gate & breaker logic
+  * creates an “execution plan” record with status `SHADOW_PLANNED`
+  * records a “shadow outcome”:
+
+    * whether it would have been marketable
+    * expected fill model / estimated VWAP from current book within tolerance
+    * expected slippage vs reference
+  * updates no real balances, but it *can* maintain a “shadow portfolio” if needed for breakers.
+* LIVE: submit orders.
+
+**Important:** Decision logic must be identical between SHADOW and LIVE. Only the last step differs.
+
+---
+
+# 2) Persist a full “decision trace” (this is the heart of debugging)
+
+Currently the bot likely stores only: mimic/skip and a reason. That’s not enough.
+
+Add a structured “trace” record for each processed episode.
+
+### New DB table (or equivalent)
+
+`decision_traces` (1 row per episode decision)
+
+* `trace_id` PK (uuid)
+* `episode_id`
+* `created_at`
+* `run_mode` (paper/shadow/live)
+* `market_id`, `token_id`
+* `input` JSON:
+
+  * episode summary: counts, vwap, net_usdc/net_shares, min/max price, flags (chop/ladder/etc.)
+  * observed trades list (ids + timestamps + prices + sizes) (or references)
+* `book_snapshot` JSON:
+
+  * best_bid, best_ask, spread
+  * bids/asks levels (store at least top N levels and also “depth within band” computed)
+  * tick_size
+  * snapshot timestamp
+* `decision` JSON:
+
+  * decision = mimic/skip/halt
+  * primary_reason_code
+  * all rule evaluations as booleans with computed values:
+
+    * age_check, tolerance_check, spread_check, depth_check, marketability_check
+    * “near_certain tightened tolerance” check
+    * any volatility checks
+  * computed reference price (vwap used)
+  * computed tolerance (abs/rel, final)
+  * computed limit price after rounding
+  * computed size (usdc/shares) before and after caps
+* `risk_gate` JSON:
+
+  * portfolio snapshot used
+  * all cap checks results with thresholds and current usage:
+
+    * max single order, max total exposure, max market exposure, daily loss, drawdown, open orders cap, rate limit cap
+  * gate outcome: allow/skip/halt + reason
+* `execution_plan` JSON:
+
+  * what would be submitted: side, limit price, size, tif, cancel policy
+  * in shadow mode: estimated fill info (see below)
+* `config_hash` TEXT (hash of effective config + per-market overrides used)
+* `raw` JSON (optional “everything else” dump, but keep it bounded)
+
+Also store references to the original raw trade JSON (either in observed_trades or linked).
+
+**Key requirement:** the trace must allow you to answer:
+“Why did it skip?” and “What would need to change in config for it to mimic?”
+
+---
+
+# 3) Shadow “execution estimation” (for intuitive debugging)
+
+In SHADOW mode, compute and store:
+
+* `would_be_marketable` bool
+* `estimated_fill_pct` (0–100)
+* `estimated_fill_usdc`, `estimated_fill_shares`
+* `estimated_vwap_fill_price`
+* `estimated_slippage_vs_reference`
+* `estimated_slippage_vs_best` (how far from best ask/bid)
+* `blocking_reason_if_unfilled` (e.g. insufficient depth within band)
+
+Use the same book-walk logic as paper sim, but do **not** write to “real” positions unless you maintain a separate “shadow portfolio”.
+
+---
+
+# 4) Build a minimal but powerful debug UI
+
+Implement a small web server in the backend (FastAPI recommended) that serves:
+
+* REST API endpoints
+* and a tiny UI (either server-rendered HTML or a static React/Vite bundle)
+
+### Requirements for UI
+
+* A timeline/table of episodes with filters:
+
+  * time range, market, decision type (mimic/skip/halt), reason codes, run mode
+  * “only episodes with chop”, “only near-certain”, “only whale”, etc.
+* Click into an episode → show a **decision explainer**:
+
+  * Episode summary
+  * List of fills grouped (sortable)
+  * Book snapshot (top N levels) + highlighted tolerance band
+  * Decision rule checklist with green/red indicators + values
+  * Risk gate checklist + values
+  * Final intent (or skip reason)
+  * Shadow estimated fill info (if shadow)
+* A “diff” view:
+
+  * compare two traces of same market/episode under different configs (or different times)
+  * show which rule flipped from fail→pass
+
+### Keep UI simple
+
+This is internal tooling; focus on clarity. No fancy charts required, but a basic:
+
+* “price band overlay” (even a simple textual display) is huge.
+
+---
+
+# 5) API endpoints (minimum)
+
+* `GET /api/episodes?from=&to=&decision=&reason=&market=&mode=&limit=`
+* `GET /api/episodes/{episode_id}` → includes trace_id(s)
+* `GET /api/traces/{trace_id}` → full trace JSON
+* `GET /api/markets/{token_id}/book_snapshot/{trace_id}` (or embed in trace)
+* `POST /api/config/reload` (optional; safe only in shadow/paper)
+* `POST /api/bot/halt` and `POST /api/bot/resume` (guarded)
+* `GET /api/stats`:
+
+  * counts by decision, reason histogram, mimic rate, avg slippage, etc.
+
+Add pagination and don’t return unbounded arrays.
+
+---
+
+# 6) Safety: debug UI must not become a trading backdoor
+
+* If `run_mode != live`, any live execution endpoint must be disabled.
+* If `run_mode == live`, admin endpoints must require auth:
+
+  * simplest: local-only bind + random admin token from env
+* Redact secrets from all responses.
+
+---
+
+# 7) Developer UX: “Explain why it skipped” helper
+
+Add a function to produce a human-readable explanation from a trace, like:
+
+* “Skipped because best ask 0.437 > max allowed 0.425 (ref 0.420 + tol 0.005).”
+* “Skipped because depth within band $120 < required $300.”
+* “Risk gate blocked: total exposure would become $2100 > max $1500.”
+
+Store this string in the trace for quick scanning.
+
+---
+
+# 8) Integration into pipeline
+
+Wire it so that every episode processed results in:
+
+* observed trades persisted
+* episode persisted
+* decision computed
+* trace written (always)
+* execution plan written (always)
+* then:
+
+  * PAPER → simulate
+  * SHADOW → estimate only
+  * LIVE → place order and store results
+
+No trace = bug.
+
+---
+
+# 9) Tests
+
+Add at least:
+
+* shadow mode never calls execution submit
+* trace includes rule results and values
+* UI endpoints return traces
+* sensitive fields are not present in API responses
+
+---
+
+## Acceptance criteria (must pass)
+
+1. Running in SHADOW mode produces a stream of episode rows in DB and UI.
+2. Clicking an episode shows full rule evaluation and risk checks with numbers.
+3. You can filter “skipped due to slippage_exceeded” and see exact thresholds.
+4. Switching SHADOW→LIVE (with proper enablement) keeps decision outputs identical for same inputs.
+5. Restart does not lose traces; no duplicate episode executions.
+
+---
+
+### Optional but recommended “gold” feature
+
+Add a small “What if?” panel (even if crude) that lets you input:
+
+* new tolerance
+* new min depth
+  and re-evaluate decision on the stored snapshot (no network calls) to see if it would flip to mimic. This makes tuning insanely fast.

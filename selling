@@ -1,0 +1,42 @@
+### Add Position & Exit Management (required)
+
+Implement explicit sell handling so the bot reduces exposure safely and consistently.
+
+1. Add config:
+
+* `exit.copy_unit`: `"shares" | "notional"` (default `"shares"`)
+* `exit.min_follow_pct`: float 0–1 (default 0.0)
+* `exit.allow_short`: bool (default false)
+* `accounting.method`: `"avg_cost" | "fifo" | "lifo"` (default `"avg_cost"`)
+* `exit.follow_only_if_position`: bool (default true)
+
+2. Maintain positions per token_id:
+
+* `shares`
+* `avg_cost` (for avg_cost method)
+* optional `lots[]` for FIFO/LIFO (each lot: shares, price, ts, source_episode_id)
+
+3. When processing a SELL episode intent:
+
+* compute `desired_sell` in shares or notional based on config and ratio
+* convert notional → shares using current best bid (conservative)
+* clip:
+
+  * if `allow_short=false`: `sell_shares = min(desired_sell, position_shares)`
+  * if `sell_shares == 0`: skip with reason `NO_POSITION`
+  * if clipped fraction < `min_follow_pct`: skip with reason `FOLLOW_TOO_SMALL`
+* execute sell
+* update positions with actual fills:
+
+  * avg_cost: realized pnl = (fill_price - avg_cost) * shares_sold
+  * fifo/lifo: consume lots
+
+4. Logging + trace:
+
+* record whether sell was clipped
+* record accounting method used
+* record realized pnl on that execution (paper/shadow estimates ok)
+
+5. Ensure the episode decision engine respects:
+
+* `exit.follow_only_if_position=true`: do not generate sell intents when we hold zero.

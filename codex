@@ -1,0 +1,282 @@
+Here’s the **English translation + adaptation** of that workflow, rewritten for an **OpenAI Codex**-driven repo that builds a **Polymarket QoL Chrome extension**.
+
+Key mapping:
+
+* **Claude.md → `AGENTS.md`** (Codex reads it automatically, layered by folder) ([OpenAI Developers][1])
+* **“Hooks” → git hooks + Codex safety controls** (Codex sandbox/approvals + `.rules`) ([OpenAI Developers][2])
+* **settings.json → `.codex/config.toml`** (project overrides supported) ([OpenAI Developers][3])
+* **“Code review agent” → Codex `/review` + (optional) GitHub `@codex review`** ([OpenAI Developers][4])
+* **Playwright MCP idea → Playwright E2E for the extension/site integration** (same spirit: let the agent debug by running the thing)
+
+---
+
+## 1) Paste this into your repo root: `AGENTS.md`
+
+Codex will load it before doing work. ([OpenAI Developers][1])
+
+```md
+# Polymarket QoL Chrome Extension — Codex Instructions
+
+## Mission
+Build a Chrome (Manifest V3) extension that adds quality-of-life features to Polymarket with:
+- minimal UI clutter
+- minimal permissions
+- strong stability under frequent site UI changes
+- zero “mystery actions” (everything user-initiated and transparent)
+
+## Non-negotiables (read this twice)
+- Keep the codebase clean. Delete dead/unused code when you touch an area.
+- Any experimental or throwaway files go ONLY under `tmp/` (and must be gitignored).
+- If logic is used more than once, extract it (utility/module/hook) instead of duplicating.
+- Never commit secrets (keys, tokens, cookies, session data). No “temporary” exceptions.
+- Don’t implement automated trading/execution. QoL only: UI, navigation, display, alerts, analytics.
+  (If something could be interpreted as “bot trading”, stop and propose an alternative.)
+
+## Project docs (must stay updated)
+- `docs/PRD.md` — product goals, user stories, success metrics
+- `docs/TECH_SPEC.md` — technical design & decisions
+- `docs/STATUS.md` — current state, folder map, what’s done/next, known bugs
+
+Rule: After every meaningful change, update `docs/STATUS.md`.
+Rule: When a decision changes (architecture, tech choice, constraints), update `docs/TECH_SPEC.md`.
+
+## Repository conventions
+- Prefer TypeScript.
+- Prefer small, composable modules over giant files.
+- Prefer explicit names over cleverness.
+- Favor deterministic behavior and good failure modes over “works on my machine”.
+
+## Chrome extension constraints
+- Manifest V3 (service worker background).
+- Permissions: as small as possible.
+- Host permissions: keep tight (Polymarket domains only).
+- Content scripts must be lightweight: avoid heavy MutationObserver loops; debounce/throttle.
+- Never break the page: defensive selectors, null checks, and safe DOM insertion.
+
+## Polymarket site integration guidelines
+- Expect DOM churn. Wrap selectors in a small abstraction and handle missing nodes.
+- Prefer data-driven anchoring (stable attributes) when available; avoid brittle deep CSS paths.
+- Add a “safe mode” toggle to disable injections if something goes wrong.
+
+## Logging & debuggability
+- Every feature should have debug logs behind a single flag (e.g. `DEBUG=true` / extension setting).
+- Logs should be detailed enough to debug without guesswork, but off by default.
+- If you add logging, ensure it does NOT leak PII or sensitive user info.
+
+## Workflow expectations (how you should operate)
+1. Plan the change briefly (what files, what risks, how to verify).
+2. Implement in small steps.
+3. Verify with lint/tests/build where available.
+4. Run a Codex code review (`/review`) before commit for non-trivial changes.
+5. Update `docs/STATUS.md` (and TECH_SPEC if needed).
+6. Commit in small chunks (avoid “mega-commit that changed everything”).
+
+## Dependency policy
+- Follow the repo’s package manager (lockfile decides).
+- Ask before adding new production dependencies.
+- Dev dependencies are OK if they clearly pay for themselves (test, lint, build).
+```
+
+---
+
+## 2) Add these docs (templates)
+
+### `docs/PRD.md`
+
+```md
+# PRD — Polymarket QoL Chrome Extension
+
+## Background / Problem
+What’s annoying or slow about using Polymarket today? What do we improve?
+
+## Goals
+- G1:
+- G2:
+- G3:
+
+## Non-goals
+- NG1: No automated trading / order placement
+- NG2:
+- NG3:
+
+## Target users
+- Primary:
+- Secondary:
+
+## Core use-cases (User Stories)
+- US1: As a user, I want…
+- US2:
+- US3:
+
+## Feature list (initial)
+- F1:
+- F2:
+- F3:
+
+## Success metrics
+- M1: time saved / clicks reduced
+- M2: feature adoption
+- M3: error rate / disable rate (safe mode)
+
+## Risks / Constraints
+- R1: Polymarket UI changes
+- R2: Chrome MV3 limitations
+- R3: Performance (content scripts)
+
+## Rollout plan
+- v0: internal
+- v1: minimal public
+- vNext:
+```
+
+### `docs/TECH_SPEC.md`
+
+```md
+# Tech Spec — Polymarket QoL Chrome Extension
+
+## Architecture overview
+- Manifest V3
+- Content scripts:
+- Background service worker:
+- UI surfaces (popup/options/in-page):
+
+## Folder structure (proposed)
+- src/
+  - content/
+  - background/
+  - ui/
+  - shared/
+- docs/
+- tmp/ (gitignored)
+
+## Data & storage
+- chrome.storage usage:
+- Settings schema:
+- Migrations strategy:
+
+## Feature implementation notes
+### Feature: <name>
+- Entry points:
+- DOM anchors/selectors strategy:
+- Failure mode:
+- Performance considerations:
+
+## Testing strategy
+- Unit tests:
+- E2E tests (Playwright recommended for site+extension integration):
+- Manual test checklist:
+
+## Build & release
+- Build tool:
+- Versioning:
+- Packaging:
+- CI:
+
+## Security & privacy
+- No secrets stored
+- No sensitive logging
+- Minimal permissions
+
+## Open decisions
+- D1:
+- D2:
+```
+
+### `docs/STATUS.md`
+
+```md
+# Status — Polymarket QoL Chrome Extension
+
+## TL;DR current state
+- What works:
+- What’s broken:
+- What’s next:
+
+## Repo map
+- src/... : purpose
+- docs/... : purpose
+- tmp/... : purpose (ignored)
+
+## Implemented features
+- ✅ F1:
+- ✅ F2:
+
+## In progress
+- 🟡 F3: (notes, blockers)
+
+## Next up
+- ⏭️ F4:
+- ⏭️ F5:
+
+## Known bugs / issues
+- 🐛 B1: repro + suspected cause
+- 🐛 B2:
+
+## Notes / Decisions log (short)
+- YYYY-MM-DD: decided X because Y
+```
+
+---
+
+## 3) Optional but very aligned with the original post: Codex safety rails
+
+### A) Project config: `.codex/config.toml`
+
+Codex supports user config (`~/.codex/config.toml`) and **project overrides** (`.codex/config.toml`) when the project is trusted. ([OpenAI Developers][3])
+
+```toml
+# .codex/config.toml
+approval_policy = "untrusted"
+sandbox_mode    = "workspace-write"
+web_search      = "cached"
+
+# keep network off unless you explicitly enable it
+[sandbox_workspace_write]
+network_access = false
+```
+
+### B) Rules to block “oops I nuked the repo”
+
+Rules let you **prompt/forbid** risky command prefixes. ([OpenAI Developers][5])
+
+Create `~/.codex/rules/default.rules` (or your team config location) and add:
+
+```python
+# Forbid obvious foot-guns
+prefix_rule(
+  pattern = ["rm", "-rf"],
+  decision = "forbidden",
+  justification = "No recursive deletes via rm -rf. Use safer alternatives or delete manually."
+)
+
+prefix_rule(
+  pattern = ["git", "push", "--force"],
+  decision = "forbidden",
+  justification = "No force-push. Use a new branch or revert."
+)
+
+# Prompt on history-rewriting / destructive git actions
+prefix_rule(
+  pattern = ["git", "reset", "--hard"],
+  decision = "prompt",
+  justification = "Hard reset is destructive. Confirm you really want this."
+)
+```
+
+---
+
+## 4) The “double review” idea (Codex-native)
+
+Instead of a custom hook-agent, Codex CLI has a built-in **dedicated reviewer**: run `/review` before committing. ([OpenAI Developers][4])
+If you later wire GitHub reviews: `@codex review` and it will follow your **AGENTS.md “Review guidelines”** if you add them. ([OpenAI Developers][6])
+
+---
+
+That’s the whole playbook converted: **one instruction spine (`AGENTS.md`) + living docs + safety rails + frequent commits + automated review**. Codex will actually respect this structure because it’s built to ingest `AGENTS.md` hierarchically. ([OpenAI Developers][1])
+
+[1]: https://developers.openai.com/codex/guides/agents-md/ "Custom instructions with AGENTS.md"
+[2]: https://developers.openai.com/codex/security/?utm_source=chatgpt.com "Security"
+[3]: https://developers.openai.com/codex/config-reference/ "Configuration Reference"
+[4]: https://developers.openai.com/codex/cli/features/?utm_source=chatgpt.com "Codex CLI features"
+[5]: https://developers.openai.com/codex/rules/?utm_source=chatgpt.com "Rules"
+[6]: https://developers.openai.com/codex/integrations/github/?utm_source=chatgpt.com "Use Codex in GitHub"

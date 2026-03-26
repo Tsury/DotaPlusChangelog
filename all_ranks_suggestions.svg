@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="481" height="508" viewBox="0 0 481 508" fill="none">
+  <rect width="481" height="508" fill="#0F1623"/>
+  <path d="M40 0V508" stroke="#D4DCEC" stroke-width="2"/>
+  <path d="M80 0V508M160 0V508M240 0V508M320 0V508M400 0V508" stroke="#1B2433"/>
+  <path d="M0 84H481M0 168H481M0 252H481M0 336H481M0 420H481" stroke="#1A2333"/>
+
+  <text x="89" y="87" fill="white" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="13" font-weight="700">Suggestions Rank:</text>
+
+  <rect x="193.5" y="68.5" width="145" height="34" rx="8" fill="#1C2E45" stroke="#3A5A7F"/>
+  <text x="246" y="89" fill="white" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="13">All Ranks</text>
+  <path d="M288 81L293 86L298 81" stroke="#AABBD6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="359" cy="81" r="6.5" stroke="#8EA1BC"/>
+  <text x="357.2" y="84.7" fill="#8EA1BC" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="10">i</text>
+
+  <rect x="194.5" y="103.5" width="159" height="258" rx="10" fill="#1B2740" stroke="#3E5575"/>
+  <rect x="195" y="143" width="158" height="33" fill="#2D4B6F"/>
+
+  <text x="212" y="125" fill="white" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="13">Detect My Rank</text>
+  <text x="212" y="162" fill="white" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="14" font-weight="700">All Ranks</text>
+
+  <g font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="13" fill="white">
+    <circle cx="222" cy="194" r="8" fill="#6E6238" stroke="#E3D18E"/>
+    <path d="M216 194H228" stroke="#DEE7F4"/>
+    <text x="242" y="198">Herald</text>
+
+    <circle cx="222" cy="228" r="8" fill="#705E41" stroke="#E3D18E"/>
+    <path d="M216 228H228" stroke="#DEE7F4"/>
+    <text x="242" y="232">Guardian</text>
+
+    <circle cx="222" cy="262" r="8" fill="#6F879C" stroke="#DBE5F3"/>
+    <path d="M216 262H228" stroke="#DEE7F4"/>
+    <text x="242" y="266">Crusader</text>
+
+    <circle cx="222" cy="296" r="8" fill="#B7A76B" stroke="#EAD894"/>
+    <path d="M216 296H228" stroke="#F3F7FC"/>
+    <text x="242" y="300">Archon</text>
+
+    <circle cx="222" cy="330" r="8" fill="#C0A764" stroke="#F1DE9B"/>
+    <path d="M216 330H228" stroke="#F3F7FC"/>
+    <text x="242" y="334">Legend</text>
+  </g>
+
+  <rect x="90.5" y="151.5" width="13" height="13" stroke="#F3F5F8"/>
+  <text x="113" y="162" fill="#CDD8EA" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="13" font-weight="700">Use only ranked matches for stats</text>
+
+  <rect x="90.5" y="246.5" width="13" height="13" rx="2" fill="#2E8FFF"/>
+  <path d="M94 252.5L97.5 256L102 248.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="113" y="257" fill="#F3F7FB" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="13" font-weight="700">Minimum hero win rate in suggestion</text>
+
+  <line x1="95" y1="319" x2="366" y2="319" stroke="#E8EDF3" stroke-width="4" stroke-linecap="round"/>
+  <g fill="#E8EDF3">
+    <circle cx="95" cy="319" r="4"/>
+    <circle cx="124" cy="319" r="4"/>
+    <circle cx="153" cy="319" r="4"/>
+    <circle cx="211" cy="319" r="4"/>
+    <circle cx="268" cy="319" r="4"/>
+    <circle cx="366" cy="319" r="4"/>
+  </g>
+  <circle cx="397" cy="319" r="6.5" fill="#82D1FF" stroke="#E1F5FF"/>
+  <text x="84" y="341" fill="#7C8EA8" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="11">40%</text>
+  <text x="144" y="341" fill="#7C8EA8" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="11">50%</text>
+  <text x="355" y="341" fill="#7C8EA8" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="11">50%</text>
+
+  <text x="113" y="391" fill="#DCE6F4" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="13" font-weight="700">Synergy weight in suggestions</text>
+  <circle cx="270" cy="386" r="6.5" stroke="#8EA1BC"/>
+  <text x="268.2" y="389.7" fill="#8EA1BC" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="10">i</text>
+
+  <line x1="95" y1="412" x2="436" y2="412" stroke="#E8EDF3" stroke-width="4" stroke-linecap="round"/>
+  <g fill="#E8EDF3">
+    <circle cx="95" cy="412" r="4"/>
+    <circle cx="210" cy="412" r="4"/>
+    <circle cx="323" cy="412" r="4"/>
+    <circle cx="436" cy="412" r="4"/>
+  </g>
+  <circle cx="323" cy="412" r="6.5" fill="#82D1FF" stroke="#E1F5FF"/>
+  <text x="86" y="434" fill="#7C8EA8" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="11">0%</text>
+  <text x="200" y="434" fill="#7C8EA8" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="11">25%</text>
+  <text x="311" y="434" fill="#7C8EA8" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="11">50%</text>
+  <text x="424" y="434" fill="#7C8EA8" font-family="Segoe UI, DejaVu Sans, sans-serif" font-size="11">75%</text>
+</svg>
